@@ -1,0 +1,123 @@
+<div class="container">
+    <p class="lead">Send Ropsten <strong>testnet</strong> ETH to the following address:</p>
+    <pre id="address">Loading...</pre>
+    <p><strong>Do not send real ETH!</strong></p>
+    <p>Exchange rate: 1 ETH = 1 TOKE token</p>
+    <p><a href="https://github.com/stellar/go/pull/81" target="_blank">Instructions</a></p>
+    <hr />
+    <div class="progress">
+        <div id="progressbar" class="progress-bar progress-bar-striped active" style="width: 0%"></div>
+    </div>
+    <p class="lead" id="status">Generating keys...</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/event-source-polyfill/0.0.9/eventsource.min.js" integrity="sha256-pP53saijIaNHRg0G+JZRZTV/aDfpP316o+XQRB/5oSg=" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stellar-sdk/0.7.3/stellar-sdk.js" integrity="sha256-MPMZ3y4bgdvp3LdkAp8jlP5RIPFFyxWtyPbJQFDol0U=" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/axios/0.16.2/axios.min.js" integrity="sha256-aXHOBRCjmgqoEhY6VBWs3Bc+E3447Iuywezt+nkgeZk=" crossorigin="anonymous"></script>
+<script>
+    function Bifrost() {
+        if (EventSource === undefined) {
+            alert("Brower not supported (no EventSource support).");
+            return;
+        }
+
+        "{{env}}" === "production"
+                ? StellarSdk.Network.usePublicNetwork()
+                : StellarSdk.Network.useTestNetwork();
+        StellarSdk.Config.setAllowHttp("{{allowHorizonHttp}}" === "on");
+
+        var horizon = new StellarSdk.Server("{{horizonUrl}}");
+
+        var bifrostURL = "{{bifrostUrl}}";
+        const issuingAccount = "{{issuingAccount}}";
+
+        var keypair = StellarSdk.Keypair.random();
+        console.log(keypair.publicKey());
+        console.log(keypair.secret());
+
+        axios.post(bifrostURL+"/generate-ethereum-address", "stellar_public_key="+keypair.publicKey())
+                .then(function(response) {
+                    console.log(response);
+                    setStatus("Waiting for a transaction...", 10);
+
+                    var address = response.data['address'];
+                    document.getElementById("address").innerText = address;
+                    var source = new EventSource(bifrostURL+"/events?stream="+address);
+                    source.addEventListener('transaction_received', function(e) {
+                        setStatus("Transaction received, creating account...", 20)
+                    }, false);
+
+                    source.addEventListener('account_created', function(e) {
+                        setStatus("Account created, creating trust lines...", 40)
+                        onAccountCreated();
+                    }, false);
+
+                    source.addEventListener('account_credited', function(e) {
+                        setStatus("Account credited, exchanging...", 80)
+                        var data = JSON.parse(e.data);
+                        onAccountCredited(data.assetCode, data.amount);
+                        source.close();
+                    }, false);
+
+                    source.addEventListener('open', function(e) {
+                        console.log("Opened");
+                    }, false);
+
+                    source.addEventListener('error', function(e) {
+                        console.log("Error");
+                    }, false);
+                })
+                .catch(function(error) {
+                    console.error(error);
+                    alert("Error connecting Bifrost server");
+                });
+
+        function setStatus(text, progess) {
+            var progressbar = document.getElementById("progressbar")
+            progressbar.style.width = progess+"%";
+            if (progess == 100) {
+                progressbar.className = "progress-bar progress-bar-success";
+            }
+            document.getElementById("status").innerHTML = text;
+        }
+
+        function onAccountCreated() {
+            // Create a trustline
+            return horizon.loadAccount(keypair.publicKey())
+                    .then(function(sourceAccount) {
+                        var transaction = new StellarSdk.TransactionBuilder(sourceAccount)
+                                .addOperation(StellarSdk.Operation.changeTrust({
+                                    asset: new StellarSdk.Asset("ETH", issuingAccount)
+                                }))
+                                .addOperation(StellarSdk.Operation.changeTrust({
+                                    asset: new StellarSdk.Asset("TOKE", issuingAccount)
+                                }))
+                                .build();
+                        transaction.sign(keypair);
+                        return horizon.submitTransaction(transaction);
+                    }).then(function() {
+                        setStatus("Trust lines created, waiting for tokens...", 60)
+                    })
+        }
+
+        function onAccountCredited(assetCode, amount) {
+            // Buy asset
+            return horizon.loadAccount(keypair.publicKey())
+                    .then(function(sourceAccount) {
+                        var transaction = new StellarSdk.TransactionBuilder(sourceAccount)
+                                .addOperation(StellarSdk.Operation.manageOffer({
+                                    selling: new StellarSdk.Asset(assetCode, issuingAccount),
+                                    buying: new StellarSdk.Asset("TOKE", issuingAccount),
+                                    amount: amount,
+                                    price: "1"
+                                }))
+                                .build();
+                        transaction.sign(keypair);
+                        return horizon.submitTransaction(transaction);
+                    }).then(function() {
+                        setStatus("Congrats! TOKE purchased. Your Stellar keys: <pre>Public key: "+keypair.publicKey()+"\nSecret key: "+keypair.secret()+"</pre>", 100);
+                    });
+        }
+    }
+    Bifrost();
+</script>
